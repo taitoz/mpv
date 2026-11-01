@@ -11,6 +11,7 @@
 - Next experiment: compare source, scale+encode only, matching output with FSRCNNX, and the full chain. Hold output resolution/fps/encoder settings constant across processed variants; record speed, size/bitrate and temporal artifacts in the headset. Check redundant scaling and eye-boundary filtering. Prefer moderate source-specific presets; QP 18 is not a universal optimum. Do not switch to slower models without demonstrated benefit.
 - Future work: research VSR activation for playback; build an installer/bootstrapper that downloads the latest suitable mpv build and retrieves the complete portable config, with integrity checks, version tracking and preservation of user settings. Neither task is implemented or verified yet.
 - `README.md` contains the Russian user-facing goals, current behavior, controls, sample restoration command, export caveats, verification instructions and roadmap. Keep it consistent with implementation.
+- Licensing: user chose GPL-3.0-or-later for own files (LICENSE already GPL-3.0 from GitHub init). Own files carry SPDX GPL-3.0-or-later headers with copyright "taitoz". `THIRD_PARTY.md` inventories bundled components and licenses; items marked unverified (evafast, reload, ytsub, cycle-commands, custom-scripts, film-grain) must not be treated as freely redistributable until checked. Never strip copyright headers from third-party files.
 
 ## Current implementation and verification
 
