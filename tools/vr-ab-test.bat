@@ -30,6 +30,9 @@ set /a "DUR=END-START"
 
 set "MPV=%~dp0..\..\mpv.exe"
 set "FFMPEG=ffmpeg"
+rem The live mpv->ffmpeg pipe reboots the PC, so shader runs go through
+rem a lossless FFV1 intermediate on local disk in two separate stages.
+set "TMP=G:\Downloads\mpv\ab-tmp"
 
 goto :baseline_skipped
 rem Baseline disabled; remove the goto above to enable this block.
@@ -39,15 +42,29 @@ if errorlevel 1 goto :fail
 timeout /t 10 /nobreak >nul
 
 :baseline_skipped
-echo === [2/3] FSRCNNX
-echo FFmpeg log: "%OUTDIR%\ffmpeg-v2-fsrcnnx.log"
-"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --brightness=0 --contrast=0 --saturation=-10 --gamma=7 --hue=3 --scale=ewa_lanczos --scale-antiring=0.3 --cscale=ewa_lanczos --cscale-antiring=0.3 --dscale=mitchell --correct-downscaling=yes --linear-downscaling=no --deband=yes --deband-iterations=3 --deband-threshold=32 --deband-range=16 --deband-grain=16 --gpu-api=d3d11 --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl" --o=- --of=nut --ovc=rawvideo --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v2-fsrcnnx.log" | %FFMPEG% -y -i pipe:0 -ss %START% -t %DUR% -i "%SRC%" -map 0:v -map 1:a? -vf "scale=%WIDTH%:2402:flags=lanczos,format=yuv420p" -c:v libx265 -preset medium -crf %QP% -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2402.mp4" 2>"%OUTDIR%\ffmpeg-v2-fsrcnnx.log"
+if not exist "%TMP%" mkdir "%TMP%"
+
+echo === [2/3] FSRCNNX - stage 1: mpv render to "%TMP%\v2.mkv"
+"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --brightness=0 --contrast=0 --saturation=-10 --gamma=7 --hue=3 --scale=ewa_lanczos --scale-antiring=0.3 --cscale=ewa_lanczos --cscale-antiring=0.3 --dscale=mitchell --correct-downscaling=yes --linear-downscaling=no --deband=yes --deband-iterations=3 --deband-threshold=32 --deband-range=16 --deband-grain=16 --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl" --o="%TMP%\v2.mkv" --of=matroska --ovc=ffv1 --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v2-fsrcnnx.log"
 if errorlevel 1 goto :fail
 timeout /t 10 /nobreak >nul
 
-echo === [3/3] full chain
-"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --brightness=0 --contrast=0 --saturation=-10 --gamma=7 --hue=3 --scale=ewa_lanczos --scale-antiring=0.3 --cscale=ewa_lanczos --cscale-antiring=0.3 --dscale=mitchell --correct-downscaling=yes --linear-downscaling=no --deband=yes --deband-iterations=3 --deband-threshold=32 --deband-range=16 --deband-grain=16 --gpu-api=d3d11 --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/nlmeans.glsl;~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl;~~/shaders/adaptive-sharpen.glsl;~~/shaders/SSim/SSimDownscaler.glsl" --o=- --of=nut --ovc=rawvideo --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v3-full.log" | %FFMPEG% -y -i pipe:0 -ss %START% -t %DUR% -i "%SRC%" -map 0:v -map 1:a? -vf "scale=%WIDTH%:2404:flags=lanczos,format=yuv420p" -c:v libx265 -preset medium -crf %QP% -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2404.mp4" 2>"%OUTDIR%\ffmpeg-v3-full.log"
+echo === [2/3] FSRCNNX - stage 2: encode "%TMP%\v2.mkv"
+%FFMPEG% -y -i "%TMP%\v2.mkv" -ss %START% -t %DUR% -i "%SRC%" -map 0:v -map 1:a? -vf "scale=%WIDTH%:2402:flags=lanczos,format=yuv420p" -c:v libx265 -preset medium -crf %QP% -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2402.mp4" 2>"%OUTDIR%\ffmpeg-v2-fsrcnnx.log"
 if errorlevel 1 goto :fail
+timeout /t 10 /nobreak >nul
+
+echo === [3/3] full chain - stage 1: mpv render to "%TMP%\v3.mkv"
+"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --brightness=0 --contrast=0 --saturation=-10 --gamma=7 --hue=3 --scale=ewa_lanczos --scale-antiring=0.3 --cscale=ewa_lanczos --cscale-antiring=0.3 --dscale=mitchell --correct-downscaling=yes --linear-downscaling=no --deband=yes --deband-iterations=3 --deband-threshold=32 --deband-range=16 --deband-grain=16 --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/nlmeans.glsl;~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl;~~/shaders/adaptive-sharpen.glsl;~~/shaders/SSim/SSimDownscaler.glsl" --o="%TMP%\v3.mkv" --of=matroska --ovc=ffv1 --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v3-full.log"
+if errorlevel 1 goto :fail
+timeout /t 10 /nobreak >nul
+
+echo === [3/3] full chain - stage 2: encode "%TMP%\v3.mkv"
+%FFMPEG% -y -i "%TMP%\v3.mkv" -ss %START% -t %DUR% -i "%SRC%" -map 0:v -map 1:a? -vf "scale=%WIDTH%:2404:flags=lanczos,format=yuv420p" -c:v libx265 -preset medium -crf %QP% -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2404.mp4" 2>"%OUTDIR%\ffmpeg-v3-full.log"
+if errorlevel 1 goto :fail
+
+echo Cleaning intermediates...
+del /q "%TMP%\v2.mkv" "%TMP%\v3.mkv" 2>nul
 
 echo === Done. Compare:
 echo     "%OUTDIR%\%OUTBASE%_2400.mp4"  baseline
