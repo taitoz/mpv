@@ -1,19 +1,7 @@
 @echo off
 setlocal
-rem ==================================================================
-rem VR restoration A/B test: 3 sequential encode runs of the same clip
-rem Run in cmd.exe ONLY (PowerShell corrupts the binary pipe).
-rem
-rem Segment: 01:20 - 06:20
-rem   *_2400  baseline: scale upscale only
-rem   *_2402  baseline + FSRCNNX glsl shader
-rem   *_2404  full restoration chain
-rem CPU path (libx265 + software scale): PC rebooted under the
-rem CUDA/hwupload/nvenc chain, so encoding is kept off the GPU.
-rem mpv --vf=gpu still renders the shaders on the GPU.
-rem Height +2 per variant to tell files apart quickly in DeoVR/XBVR.
-rem ==================================================================
-
+rem VR restoration A/B test. Run in cmd.exe, not PowerShell 5.1.
+rem Segment: 01:20 - 06:20. Heights identify variants in DeoVR/XBVR.
 set "SRC=X:\$XVR_Lib\Main\Romi Rain\T&A 1700p_VR180_SBS_LR.mp4"
 set "OUTDIR=X:\$XVR_Lib\Main\Romi Rain"
 set "OUTBASE=T&A VR180_SBS_LR"
@@ -21,61 +9,45 @@ set "START=80"
 set "END=380"
 set "WIDTH=4800"
 set "QP=18"
-rem GLSL shaders only reach the mpv encode output via --vf=gpu.
-rem Its output must exceed ~1.2x the source or FSRCNNX stays inactive.
-rem 4800x2400 = 1.41x source; rgb0 pipe ~2GB/s. 6800x3400 was ~4GB/s and stalled.
-set "SHW=4800"
-set "SHH=2400"
+rem vf=gpu output: >1.2x source keeps FSRCNNX active.
+rem 4096x2048 cuts pipe/CPU-conversion load vs 4800x2400;
+rem final 4800x24xx comes from scale_cuda.
+set "SHW=4096"
+set "SHH=2048"
 set /a "DUR=END-START"
-
 set "MPV=%~dp0..\..\mpv.exe"
 set "FFMPEG=ffmpeg"
-rem The live mpv->ffmpeg pipe reboots the PC, so shader runs go through
-rem a lossless FFV1 intermediate on local disk in two separate stages.
-set "TMP=G:\Downloads\mpv\ab-tmp"
+set "RENDER=--brightness=0 --contrast=0 --saturation=-10 --gamma=7 --hue=3 --scale=ewa_lanczos --scale-antiring=0.3 --cscale=ewa_lanczos --cscale-antiring=0.3 --dscale=mitchell --correct-downscaling=yes --linear-downscaling=no --deband=yes --deband-iterations=3 --deband-threshold=32 --deband-range=16 --deband-grain=16"
 
-goto :baseline_skipped
-rem Baseline disabled; remove the goto above to enable this block.
+if /i "%~1"=="1" goto :run1
+if /i "%~1"=="2" goto :run2
+if /i "%~1"=="3" goto :run3
+
+:run1
 echo === [1/3] baseline scale-only
-"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --o=- --of=nut --ovc=rawvideo --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v1-baseline.log" | %FFMPEG% -y -i pipe:0 -ss %START% -t %DUR% -i "%SRC%" -map 0:v -map 1:a? -vf "scale=%WIDTH%:2400:flags=lanczos,format=yuv420p" -c:v libx265 -preset medium -crf %QP% -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2400.mp4"
+"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --glsl-shaders-clr --o=- --of=nut --ovc=rawvideo --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v1-baseline.log" | "%FFMPEG%" -y -init_hw_device cuda=cuda:0 -filter_hw_device cuda -i pipe:0 -ss %START% -t %DUR% -i "%SRC%" -map 0:v:0 -map 1:a? -vf "format=nv12,hwupload,scale_cuda=%WIDTH%:2400" -t %DUR% -fps_mode passthrough -c:v hevc_nvenc -rc constqp -qp %QP% -b:v 0 -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2400.mp4" 2>"%OUTDIR%\ffmpeg-v1-baseline.log"
 if errorlevel 1 goto :fail
-timeout /t 10 /nobreak >nul
+if /i "%~1"=="1" goto :done
 
-:baseline_skipped
-if not exist "%TMP%" mkdir "%TMP%"
-
-echo === [2/3] FSRCNNX - stage 1: mpv render to "%TMP%\v2.mkv"
-"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --brightness=0 --contrast=0 --saturation=-10 --gamma=7 --hue=3 --scale=ewa_lanczos --scale-antiring=0.3 --cscale=ewa_lanczos --cscale-antiring=0.3 --dscale=mitchell --correct-downscaling=yes --linear-downscaling=no --deband=yes --deband-iterations=3 --deband-threshold=32 --deband-range=16 --deband-grain=16 --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl" --o="%TMP%\v2.mkv" --of=matroska --ovc=ffv1 --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v2-fsrcnnx.log"
+:run2
+echo === [2/3] FSRCNNX
+"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% %RENDER% --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl" --o=- --of=nut --ovc=rawvideo --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v2-fsrcnnx.log" | "%FFMPEG%" -y -init_hw_device cuda=cuda:0 -filter_hw_device cuda -i pipe:0 -ss %START% -t %DUR% -i "%SRC%" -map 0:v:0 -map 1:a? -vf "format=nv12,hwupload,scale_cuda=%WIDTH%:2402" -t %DUR% -fps_mode passthrough -c:v hevc_nvenc -rc constqp -qp %QP% -b:v 0 -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2402.mp4" 2>"%OUTDIR%\ffmpeg-v2-fsrcnnx.log"
 if errorlevel 1 goto :fail
-timeout /t 10 /nobreak >nul
+if /i "%~1"=="2" goto :done
 
-echo === [2/3] FSRCNNX - stage 2: encode "%TMP%\v2.mkv"
-%FFMPEG% -y -i "%TMP%\v2.mkv" -ss %START% -t %DUR% -i "%SRC%" -map 0:v -map 1:a? -vf "scale=%WIDTH%:2402:flags=lanczos,format=yuv420p" -c:v libx265 -preset medium -crf %QP% -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2402.mp4" 2>"%OUTDIR%\ffmpeg-v2-fsrcnnx.log"
-if errorlevel 1 goto :fail
-timeout /t 10 /nobreak >nul
-
-echo === [3/3] full chain - stage 1: mpv render to "%TMP%\v3.mkv"
-"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% --brightness=0 --contrast=0 --saturation=-10 --gamma=7 --hue=3 --scale=ewa_lanczos --scale-antiring=0.3 --cscale=ewa_lanczos --cscale-antiring=0.3 --dscale=mitchell --correct-downscaling=yes --linear-downscaling=no --deband=yes --deband-iterations=3 --deband-threshold=32 --deband-range=16 --deband-grain=16 --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/nlmeans.glsl;~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl;~~/shaders/adaptive-sharpen.glsl;~~/shaders/SSim/SSimDownscaler.glsl" --o="%TMP%\v3.mkv" --of=matroska --ovc=ffv1 --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v3-full.log"
-if errorlevel 1 goto :fail
-timeout /t 10 /nobreak >nul
-
-echo === [3/3] full chain - stage 2: encode "%TMP%\v3.mkv"
-%FFMPEG% -y -i "%TMP%\v3.mkv" -ss %START% -t %DUR% -i "%SRC%" -map 0:v -map 1:a? -vf "scale=%WIDTH%:2404:flags=lanczos,format=yuv420p" -c:v libx265 -preset medium -crf %QP% -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2404.mp4" 2>"%OUTDIR%\ffmpeg-v3-full.log"
+:run3
+echo === [3/3] full chain
+"%MPV%" --load-auto-profiles=no --start=%START% --end=%END% %RENDER% --vf=gpu=w=%SHW%:h=%SHH% --glsl-shaders-clr --glsl-shaders="~~/shaders/nlmeans.glsl;~~/shaders/FSRCNNX/FSRCNNX_x2_16-0-4-1_enhance.glsl;~~/shaders/adaptive-sharpen.glsl;~~/shaders/SSim/SSimDownscaler.glsl" --o=- --of=nut --ovc=rawvideo --oac=pcm_s16le "%SRC%" 2>"%OUTDIR%\mpv-v3-full.log" | "%FFMPEG%" -y -init_hw_device cuda=cuda:0 -filter_hw_device cuda -i pipe:0 -ss %START% -t %DUR% -i "%SRC%" -map 0:v:0 -map 1:a? -vf "format=nv12,hwupload,scale_cuda=%WIDTH%:2404" -t %DUR% -fps_mode passthrough -c:v hevc_nvenc -rc constqp -qp %QP% -b:v 0 -tag:v hvc1 -c:a copy "%OUTDIR%\%OUTBASE%_2404.mp4" 2>"%OUTDIR%\ffmpeg-v3-full.log"
 if errorlevel 1 goto :fail
 
-echo Cleaning intermediates...
-del /q "%TMP%\v2.mkv" "%TMP%\v3.mkv" 2>nul
-
-echo === Done. Compare:
-echo     "%OUTDIR%\%OUTBASE%_2400.mp4"  baseline
-echo     "%OUTDIR%\%OUTBASE%_2402.mp4"  FSRCNNX
-echo     "%OUTDIR%\%OUTBASE%_2404.mp4"  full chain
-echo.
-echo Pixel-diff check whether shaders reached the export:
-echo     ffmpeg -i "%OUTDIR%\%OUTBASE%_2400.mp4" -i "%OUTDIR%\%OUTBASE%_2402.mp4" -filter_complex "[0:v][1:v]blend=difference" -f null -
-echo.
+:done
+echo === Done. Outputs:
+echo "%OUTDIR%\%OUTBASE%_2400.mp4"
+echo "%OUTDIR%\%OUTBASE%_2402.mp4"
+echo "%OUTDIR%\%OUTBASE%_2404.mp4"
 exit /b 0
 
 :fail
-echo === FAILED (errorlevel %errorlevel%)
-exit /b %errorlevel%
+set "RESULT=%errorlevel%"
+echo === FAILED. Check mpv-v*.log and ffmpeg-v*.log in the output directory.
+exit /b %RESULT%
