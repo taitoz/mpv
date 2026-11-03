@@ -132,8 +132,8 @@ Get-WinEvent -FilterHashtable @{LogName='System'; Id=41,6008} -MaxEvents 4 | For
 1. **GPU: ограничение частоты** — самая сильная мера против пиков, сильнее power limit. В консоли администратора: `nvidia-smi -lgc 210,1700` (сброс: `nvidia-smi -rgc`; после перезагрузки сбрасывается само). 
 "nvidia-smi.exe" -q -d CLOCK
 "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe" -q -d POWER
-
 Альтернатива — undervolt по кривой V/F (например, ~0.85 V при ~1800 МГц) в Afterburner/X1.
+
 2. **GPU: power limit 65%** — если ограничения частоты недостаточно или как дополнительный шаг.
 3. **CPU: PL2 95 W** (PL1 65 W), AVX-512 остаётся выключенным. На экспорт почти не влияет, снижает пиковый ток CPU при компиляции шейдеров и CPU-обработке.
 4. **PCIe Gen3** для слота видеокарты, затем **Re-Size BAR off**. Вероятность невысокая (нет WHEA PCIe), но проверка дешёвая и полностью обратимая.
