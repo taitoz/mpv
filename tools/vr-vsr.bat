@@ -1,0 +1,1 @@
+G:\mpv-vfx\Scripts\python.exe G:\Downloads\mpv\portable_config\tools\vr-vsr.py --src "X:\$XVR_Lib\Main\Romi Rain\T&A 1700p_VR180_SBS_LR.mp4" --out "X:\$XVR_Lib\Main\Romi Rain\T&A VR180_SBS_LR_vsr.mp4" --start 80 --duration 60 --width 4800 --height 2400 --layout sbs
