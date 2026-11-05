@@ -37,6 +37,7 @@ def parse_args():
     p.add_argument("--quality", default="HIGH", help="VideoSuperRes.QualityLevel name, e.g. LOW/MEDIUM/HIGH/ULTRA")
     p.add_argument("--strength", type=float, default=1.0)
     p.add_argument("--venc", default=DEFAULT_VENC, help="ffmpeg video encoder arguments")
+    p.add_argument("--post", default="", help="extra ffmpeg filters after NV12 conversion, e.g. unsharp=5:5:0.6")
     p.add_argument("--ffmpeg", default="ffmpeg")
     p.add_argument("--ffprobe", default="ffprobe")
     p.add_argument("--no-hwdec", action="store_true", help="decode on CPU instead of -hwaccel cuda")
@@ -191,7 +192,8 @@ def main():
     enc_cmd = ([args.ffmpeg, "-hide_banner", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
                 "-s", f"{args.width}x{args.height}", "-framerate", info["r_frame_rate"], "-i", "-"]
                + trim + ["-i", args.src, "-map", "0:v:0", "-map", "1:a?",
-                         "-vf", "scale=out_color_matrix=bt709:out_range=tv:threads=0,format=nv12"]
+                         "-vf", "scale=out_color_matrix=bt709:out_range=tv:threads=0,format=nv12"
+                         + (("," + args.post) if args.post else "")]
                + shlex.split(args.venc)
                + ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                   "-color_range", "tv", "-c:a", "copy", str(out)])
