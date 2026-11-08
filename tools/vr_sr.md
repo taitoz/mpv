@@ -9,16 +9,16 @@
 `vr-sr.py` reuses the venv created for `vr-vsr.py`, plus `spandrel` for model loading:
 
 ```cmd
-"%USERPROFILE%\mpv-vfx\Scripts\python.exe" -m pip install spandrel safetensors
-"%USERPROFILE%\mpv-vfx\Scripts\python.exe" -c "import torch, spandrel; print(torch.cuda.get_device_name(0))"
+"G:\mpv-vfx\Scripts\python.exe" -m pip install spandrel safetensors
+"G:\mpv-vfx\Scripts\python.exe" -c "import torch, spandrel; print(torch.cuda.get_device_name(0))"
 ```
 
 **Fix: `python.exe` keeps disappearing from the venv.** If Python was installed from the Microsoft Store, `venv` puts a tiny app-execution-alias redirector in `Scripts\` instead of a real interpreter, and Windows updates/AV scans can break or delete it. Recreate the venv with `--copies` so the real `python.exe` is copied in:
 
 ```cmd
-py -3.12 -m venv --copies "%USERPROFILE%\mpv-vfx"
-"%USERPROFILE%\mpv-vfx\Scripts\python.exe" -m pip install torch==2.14.1 numpy --index-url https://download.pytorch.org/whl/cu126
-"%USERPROFILE%\mpv-vfx\Scripts\python.exe" -m pip install nvidia-vfx==0.2.0.0 spandrel safetensors --extra-index-url https://pypi.nvidia.com
+py -3.12 -m venv --copies "G:\mpv-vfx"
+"G:\mpv-vfx\Scripts\python.exe" -m pip install torch==2.14.1 numpy --index-url https://download.pytorch.org/whl/cu126
+"G:\mpv-vfx\Scripts\python.exe" -m pip install nvidia-vfx==0.2.0.0 spandrel safetensors --extra-index-url https://pypi.nvidia.com
 ```
 
 If it still vanishes after `--copies`, check Windows Defender → Protection history — the venv dir may need an exclusion (never disable protection globally for this).

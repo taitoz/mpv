@@ -59,5 +59,4 @@ Thumbs.db
 Desktop.ini
 /.idea/
 /.vscode/
-tools/__pycache__/vr-sr.cpython-313.pyc
-tools/__pycache__/vr-sr.cpython-314.pyc
+tools/__pycache__/

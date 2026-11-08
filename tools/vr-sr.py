@@ -21,7 +21,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-DEFAULT_VENC = "-c:v hevc_nvenc -rc constqp -qp 18 -b:v 0 -tag:v hvc1"
+DEFAULT_VENC = "-c:v hevc_nvenc -preset p4 -tune hq -rc vbr -b:v 45M -maxrate:v 60M -bufsize:v 80M -tag:v hvc1"
 
 
 def parse_args():
@@ -33,7 +33,15 @@ def parse_args():
     p.add_argument("--width", type=int, required=True, help="full output frame width")
     p.add_argument("--height", type=int, required=True, help="full output frame height")
     p.add_argument("--layout", choices=["sbs", "tb", "mono"], default="sbs")
-    p.add_argument("--model", required=True, help="path to .pth/.safetensors SR weights")
+    p.add_argument("--model", default="", help="path to .pth/.safetensors SR weights, or a raw TensorRT .engine with --engine")
+    p.add_argument("--resize-only", action="store_true",
+                   help="no model: plain GPU bicubic+antialias downscale to --width/--height with --sharpen")
+    p.add_argument("--engine", action="store_true",
+                   help="load --model as a raw TensorRT engine (.engine/.plan) via tensorrt runtime")
+    p.add_argument("--model-scale", type=int, default=0,
+                   help="required with --engine: model upscale factor (e.g. 4 for Nomos8k)")
+    p.add_argument("--engine-input", type=int, default=0,
+                   help="required with --engine: fixed input tile size incl. padding (e.g. 532)")
     p.add_argument("--tile", type=int, default=512,
                    help="input tile size in pixels; larger (768/1024) means fewer model calls if VRAM allows")
     p.add_argument("--tile-batch", type=int, default=4,
@@ -94,6 +102,89 @@ def join_eyes(eyes, layout):
     return torch.cat(eyes, dim=2 if layout == "sbs" else 1)
 
 
+def _kr_kb(matrix):
+    return (0.299, 0.114) if matrix == "bt601" else (0.2126, 0.0722)
+
+
+def nv12_to_rgb(buf, w, h, matrix, rng):
+    """NV12 byte buffer -> (3, h, w) float cuda tensor, 0..1 full range."""
+    frame = torch.frombuffer(buf, dtype=torch.uint8).view(h * 3 // 2, w).cuda()
+    y8, uv8 = frame[:h].float(), frame[h:].view(h // 2, w // 2, 2).float()
+    if rng == "pc":
+        yn = y8.div(255.0)
+        un = uv8[..., 0].sub(128).div(255.0)
+        vn = uv8[..., 1].sub(128).div(255.0)
+    else:
+        yn = y8.sub(16).div(219)
+        un = uv8[..., 0].sub(128).div(224)
+        vn = uv8[..., 1].sub(128).div(224)
+    un = F.interpolate(un[None, None], size=(h, w), mode="bilinear", align_corners=False)[0, 0]
+    vn = F.interpolate(vn[None, None], size=(h, w), mode="bilinear", align_corners=False)[0, 0]
+    kr, kb = _kr_kb(matrix)
+    r = yn + vn * (2 * (1 - kr))
+    b = yn + un * (2 * (1 - kb))
+    g = (yn - kr * r - kb * b) / (1 - kr - kb)
+    return torch.stack([r, g, b]).clamp_(0.0, 1.0)
+
+
+def rgb_to_nv12(x):
+    """(3, h, w) float 0..1 -> NV12 uint8 tensor, always BT.709 limited (matches
+    the output tagging). Chroma is decimated with a 2x2 average."""
+    kr, kb = 0.2126, 0.0722
+    r, g, b = x[0], x[1], x[2]
+    yp = kr * r + (1 - kr - kb) * g + kb * b
+    un = (b - yp) / (2 * (1 - kb))
+    vn = (r - yp) / (2 * (1 - kr))
+    y8 = yp * 219.0 + 16
+    u8 = F.avg_pool2d((un * 224.0 + 128)[None], 2)[0]
+    v8 = F.avg_pool2d((vn * 224.0 + 128)[None], 2)[0]
+    uv = torch.stack([u8, v8], dim=2).view(x.shape[1] // 2, x.shape[2])
+    return torch.cat([y8, uv]).add(0.5).clamp(0, 255).to(torch.uint8)
+
+
+class ResizeOnly:
+    """No model — GPU resize of each eye's luma (with unsharp) and chroma
+    directly in NV12 planes; the RGB roundtrip is skipped entirely."""
+
+    scale, batch = 1, "-"
+
+    def __init__(self, sharpen, ow, oh, layout):
+        self.target, self.sharpen, self.layout = (oh, ow), sharpen, layout
+
+    def _rs(self, plane, oh, ow, sharpen):
+        # plane: (H, W, C) float -> (oh, ow, C)
+        out = F.interpolate(plane.permute(2, 0, 1)[None].float(), size=(oh, ow),
+                            mode="bicubic", antialias=True, align_corners=False)[0]
+        if sharpen:
+            blur = F.avg_pool2d(out, kernel_size=3, stride=1, padding=1)
+            out = (out + sharpen * (out - blur)).clamp_(0.0, 255.0)
+        return out.permute(1, 2, 0)
+
+    def __call__(self, frame):
+        # frame: (h*3/2, w) uint8 nv12 on cuda -> (oh*3/2, ow) uint8 nv12.
+        # Luma is resized per eye with unsharp; chroma is handled as (U,V)
+        # pairs so adjacent pairs never bleed into each other.
+        (oh, ow), layout = self.target, self.layout
+        h, w = frame.shape[0] * 2 // 3, frame.shape[1]
+        y = frame[:h]
+        uv = frame[h:].view(h // 2, w // 2, 2)  # (h/2, w/2, 2) interleaved pairs
+        if layout == "sbs":
+            y_eyes = [y[..., None] for y in (y[:, :w // 2], y[:, w // 2:])]
+            uv_eyes = [uv[:, :w // 4], uv[:, w // 4:]]
+            t = (oh, ow // 2)
+            cat_y, cat_uv = 1, 1
+        elif layout == "tb":
+            y_eyes = [y[..., None] for y in (y[:h // 2], y[h // 2:])]
+            uv_eyes = [uv[:h // 4], uv[h // 4:]]
+            t = (oh // 2, ow)
+            cat_y, cat_uv = 0, 0
+        else:
+            y_eyes, uv_eyes, t, cat_y, cat_uv = [y[..., None]], [uv], (oh, ow), 0, 0
+        y_out = torch.cat([self._rs(p, t[0], t[1], self.sharpen)[..., 0] for p in y_eyes], dim=cat_y)
+        uv_out = torch.cat([self._rs(p, t[0] // 2, t[1] // 2, 0) for p in uv_eyes], dim=cat_uv)
+        return torch.cat([y_out, uv_out.reshape(oh // 2, ow)]).add(0.5).clamp(0, 255).to(torch.uint8)
+
+
 class TiledSr:
     """One spandrel SR model, applied to an eye frame with padded tiling.
 
@@ -104,17 +195,58 @@ class TiledSr:
     """
 
     def __init__(self, model_path, tile, pad, tile_batch, fp32, compile_model,
-                 downscale, sharpen, ow, oh):
-        from spandrel import ModelLoader
-        self.model = ModelLoader().load_from_file(model_path).cuda().eval()
-        if float(self.model.scale) != int(self.model.scale):
-            sys.exit(f"model scale {self.model.scale} is non-integer, unsupported")
-        self.scale = int(self.model.scale)
-        self.tile, self.pad, self.batch = tile, pad, max(1, tile_batch)
-        self.dtype = torch.float32 if fp32 else torch.float16
-        self.model = self.model.to(dtype=self.dtype)
-        if compile_model:
-            self.model = torch.compile(self.model, mode="reduce-overhead")
+                 downscale, sharpen, ow, oh, engine=False, model_scale=0, engine_input=0):
+        if engine:
+            if not model_scale or not engine_input:
+                sys.exit("--engine needs --model-scale and --engine-input")
+            import tensorrt as trt
+            eng = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(
+                Path(model_path).read_bytes())
+            ctx = eng.create_execution_context()
+            in_name = next(eng.get_tensor_name(i) for i in range(eng.num_io_tensors)
+                           if eng.get_tensor_mode(eng.get_tensor_name(i)) == trt.TensorIOMode.INPUT)
+            out_name = next(eng.get_tensor_name(i) for i in range(eng.num_io_tensors)
+                            if eng.get_tensor_mode(eng.get_tensor_name(i)) == trt.TensorIOMode.OUTPUT)
+            io_dtype = torch.float16 if eng.get_tensor_dtype(in_name) == trt.DataType.HALF else torch.float32
+            in_shape = tuple(eng.get_tensor_shape(in_name))
+            if in_shape[2] != engine_input:
+                sys.exit(f"engine expects input {in_shape}, got --engine-input {engine_input}")
+            # fixed-batch engines report dim N>0; dynamic ones report -1 and
+            # are then bounded only by the build profile (our builds: 1..4)
+            max_batch = in_shape[0] if in_shape[0] > 0 else tile_batch
+
+            def run_trt(batch):
+                x = batch.to(io_dtype).contiguous()
+                ctx.set_input_shape(in_name, tuple(x.shape))
+                y = torch.empty(tuple(ctx.get_tensor_shape(out_name)), device=x.device, dtype=io_dtype)
+                ctx.set_tensor_address(in_name, x.data_ptr())
+                ctx.set_tensor_address(out_name, y.data_ptr())
+                ctx.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+                return y
+
+            self.model = run_trt
+            self.scale = model_scale
+            # engine input == engine_input; pad is the border; batch is per engine profile
+            self.tile, self.pad, self.batch = engine_input - 2 * pad, pad, max(1, min(tile_batch, max_batch))
+            self.dtype = io_dtype
+            self.cl = False
+        else:
+            from spandrel import ModelLoader
+            self.model = ModelLoader().load_from_file(model_path).cuda().eval()
+            if float(self.model.scale) != int(self.model.scale):
+                sys.exit(f"model scale {self.model.scale} is non-integer, unsupported")
+            self.scale = int(self.model.scale)
+            self.tile, self.pad, self.batch = tile, pad, max(1, tile_batch)
+            self.dtype = torch.float32 if fp32 else torch.float16
+            self.model = self.model.to(dtype=self.dtype)
+            # channels_last is measurably faster for conv SR models in fp16 (~25%)
+            try:
+                self.model.model.to(memory_format=torch.channels_last)
+                self.cl = True
+            except AttributeError:
+                self.cl = False
+            if compile_model:
+                self.model = torch.compile(self.model, mode="reduce-overhead")
         self.target = (oh, ow)
         self.downscale, self.sharpen = downscale, sharpen
 
@@ -143,7 +275,10 @@ class TiledSr:
                 tiles.append(tile_in)
                 coords.append((y, y1, xx, x1))
         for i0 in range(0, len(tiles), self.batch):
-            up = self.model(torch.cat(tiles[i0:i0 + self.batch]))
+            batch = torch.cat(tiles[i0:i0 + self.batch])
+            if self.cl:
+                batch = batch.to(memory_format=torch.channels_last)
+            up = self.model(batch)
             for j, (y, y1, xx, x1) in enumerate(coords[i0:i0 + self.batch]):
                 # image row/col y/xx always sits at padded index p
                 out[:, y * s:y1 * s, xx * s:x1 * s] = up[j, :, p * s:p * s + (y1 - y) * s, p * s:p * s + (x1 - xx) * s]
@@ -200,24 +335,47 @@ def main():
         print(f"warning: {info['pix_fmt']} source is processed as 8-bit RGB", file=sys.stderr)
     matrix, rng = color_args(info)
     iw, ih, ow, oh = eye_geometry(args.layout, w, h, args.width, args.height)
-
-    sr = TiledSr(args.model, args.tile, args.pad, args.tile_batch, args.fp32, args.compile,
-                 args.downscale, args.sharpen, ow, oh)
-    print(f"sr x{sr.scale} ({'fp32' if args.fp32 else 'fp16'}), {args.layout}, "
-          f"per eye: {iw}x{ih} tiled {args.tile}+{args.pad} x{sr.batch} -> {ow}x{oh}")
-
     out = Path(args.out)
     trim = ["-ss", str(args.start)] + (["-t", str(args.duration)] if args.duration else [])
+
+    if args.resize_only:
+        # pure-ffmpeg path: scale_cuda (lanczos) on GPU -> NVENC; the CPU
+        # --post chain (e.g. unsharp) needs a hwdownload first. The pipe
+        # version of this was ~6x slower — raw pipes cap around 500 MB/s.
+        vf = f"scale_cuda={args.width}:{args.height}:interp_algo=lanczos"
+        if args.post:
+            vf += ",hwdownload,format=nv12," + args.post
+        cmd = ([args.ffmpeg, "-hide_banner", "-y", "-hwaccel", "cuda",
+                "-hwaccel_output_format", "cuda"] + trim
+               + ["-i", args.src, "-map", "0:v:0", "-map", "0:a?", "-vf", vf]
+               + shlex.split(args.venc)
+               + ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+                  "-color_range", "tv", "-c:a", "copy", str(out)])
+        print(f"resize-only scale_cuda lanczos -> {args.width}x{args.height}"
+              + (f" + {args.post}" if args.post else ""))
+        with open(out.with_suffix(".enc.log"), "wb") as enc_log:
+            rc = subprocess.call(cmd, stderr=enc_log)
+        if rc:
+            sys.exit(f"failed: encoder rc={rc}; see {out.stem}.enc.log")
+        print(f"done -> {out}")
+        return
+    else:
+        if not args.model:
+            sys.exit("--model is required (or use --resize-only)")
+        sr = TiledSr(args.model, args.tile, args.pad, args.tile_batch, args.fp32, args.compile,
+                     args.downscale, args.sharpen, ow, oh,
+                     engine=args.engine, model_scale=args.model_scale, engine_input=args.engine_input)
+        print(f"sr x{sr.scale} ({'fp32' if args.fp32 else 'fp16'}), {args.layout}, "
+              f"per eye: {iw}x{ih} tiled {args.tile}+{args.pad} x{sr.batch} -> {ow}x{oh}")
+
     dec_cmd = ([args.ffmpeg, "-hide_banner", "-loglevel", "error"]
                + ([] if args.no_hwdec else ["-hwaccel", "cuda"])
                + trim + ["-i", args.src, "-map", "0:v:0",
-                         "-vf", f"scale=in_color_matrix={matrix}:in_range={rng}:threads=0,format=rgb24",
-                         "-f", "rawvideo", "-"])
-    enc_cmd = ([args.ffmpeg, "-hide_banner", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                         "-vf", "format=nv12", "-f", "rawvideo", "-"])
+    enc_cmd = ([args.ffmpeg, "-hide_banner", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
                 "-s", f"{args.width}x{args.height}", "-framerate", info["r_frame_rate"], "-i", "-"]
-               + trim + ["-i", args.src, "-map", "0:v:0", "-map", "1:a?",
-                         "-vf", "scale=out_color_matrix=bt709:out_range=tv:threads=0,format=nv12"
-                         + (("," + args.post) if args.post else "")]
+               + trim + ["-i", args.src, "-map", "0:v:0", "-map", "1:a?"]
+               + (["-vf", args.post] if args.post else [])
                + shlex.split(args.venc)
                + ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                   "-color_range", "tv", "-c:a", "copy", str(out)])
@@ -229,14 +387,14 @@ def main():
         # pool of pinned output buffers: D2H copy runs async on the CUDA stream
         # and the pipe writer overlaps it with the next frame's compute
         PIN = 3
-        pin_bufs = [torch.empty(args.height * args.width * 3, dtype=torch.uint8,
+        pin_bufs = [torch.empty(args.height * args.width * 3 // 2, dtype=torch.uint8,
                                 pin_memory=True) for _ in range(PIN)]
-        pin_views = [memoryview(b.view(args.height, args.width, 3).numpy()) for b in pin_bufs]
+        pin_views = [memoryview(b.numpy()) for b in pin_bufs]
         pin_ev = [torch.cuda.Event() for _ in range(PIN)]
         pin_done = [threading.Event() for _ in range(PIN)]
         for e in pin_done:
             e.set()
-        reader = threading.Thread(target=read_frames, args=(dec.stdout, w * h * 3, q_in), daemon=True)
+        reader = threading.Thread(target=read_frames, args=(dec.stdout, w * h * 3 // 2, q_in), daemon=True)
         writer = threading.Thread(target=write_frames, args=(enc.stdin, q_out, pin_views, pin_ev, pin_done), daemon=True)
         reader.start()
         writer.start()
@@ -245,13 +403,16 @@ def main():
         try:
             with torch.inference_mode():
                 while (buf := q_in.get()) is not None:
-                    x = torch.frombuffer(buf, dtype=torch.uint8).view(h, w, 3).cuda()
-                    x = x.permute(2, 0, 1).float().div_(255.0)
-                    y = join_eyes([sr(e) for e in split_eyes(x, args.layout)], args.layout)
-                    y = y.clamp_(0.0, 1.0).mul_(255.0).add_(0.5).to(torch.uint8).permute(1, 2, 0)
+                    if args.resize_only:
+                        frame = torch.frombuffer(buf, dtype=torch.uint8).view(h * 3 // 2, w).cuda()
+                        nv = sr(frame)
+                    else:
+                        x = nv12_to_rgb(buf, w, h, matrix, rng)
+                        y = join_eyes([sr(e) for e in split_eyes(x, args.layout)], args.layout)
+                        nv = rgb_to_nv12(y.clamp_(0.0, 1.0))
                     i = frames % PIN
                     pin_done[i].wait()
-                    pin_bufs[i].view(args.height, args.width, 3).copy_(y, non_blocking=True)
+                    pin_bufs[i].copy_(nv.flatten(), non_blocking=True)
                     pin_ev[i].record()
                     q_out.put(i)
                     frames += 1
