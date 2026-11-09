@@ -42,6 +42,8 @@ def parse_args():
                    help="required with --engine: model upscale factor (e.g. 4 for Nomos8k)")
     p.add_argument("--engine-input", type=int, default=0,
                    help="required with --engine: fixed input tile size incl. padding (e.g. 532)")
+    p.add_argument("--pre-resize", type=int, default=0,
+                   help="limit each eye's longest side before SR (0 keeps source size)")
     p.add_argument("--tile", type=int, default=512,
                    help="input tile size in pixels; larger (768/1024) means fewer model calls if VRAM allows")
     p.add_argument("--tile-batch", type=int, default=4,
@@ -375,7 +377,7 @@ def main():
     enc_cmd = ([args.ffmpeg, "-hide_banner", "-y", "-f", "rawvideo", "-pix_fmt", "nv12",
                 "-s", f"{args.width}x{args.height}", "-framerate", info["r_frame_rate"], "-i", "-"]
                + trim + ["-i", args.src, "-map", "0:v:0", "-map", "1:a?"]
-               + (["-vf", args.post] if args.post else [])
+               + (["-vf", args.post + ",scale=out_color_matrix=bt709:out_range=tv,format=nv12"] if args.post else [])
                + shlex.split(args.venc)
                + ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                   "-color_range", "tv", "-c:a", "copy", str(out)])
@@ -408,7 +410,16 @@ def main():
                         nv = sr(frame)
                     else:
                         x = nv12_to_rgb(buf, w, h, matrix, rng)
-                        y = join_eyes([sr(e) for e in split_eyes(x, args.layout)], args.layout)
+                        eyes = []
+                        for eye in split_eyes(x, args.layout):
+                            eh, ew = eye.shape[-2:]
+                            if args.pre_resize > 0 and max(eh, ew) > args.pre_resize:
+                                ratio = args.pre_resize / max(eh, ew)
+                                eye = F.interpolate(eye[None], size=(max(1, round(eh * ratio)),
+                                                    max(1, round(ew * ratio))), mode="bicubic",
+                                                    antialias=True, align_corners=False)[0].clamp_(0, 1)
+                            eyes.append(sr(eye))
+                        y = join_eyes(eyes, args.layout)
                         nv = rgb_to_nv12(y.clamp_(0.0, 1.0))
                     i = frames % PIN
                     pin_done[i].wait()
