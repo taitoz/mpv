@@ -30,8 +30,7 @@ mpv/
     ├── shaders/
     │   └── vr-flat.glsl           Шейдер перепроекции
     ├── tools/
-    │   ├── vr-ab-test.bat         A/B-экспорт VR (cmd.exe)
-    │   └── vr-vsr.py              Офлайн-экспорт через NVIDIA VFX VSR
+    │   └── bootstrap.ps1          Установщик/обновление зависимостей (PS 5.1)
     ├── script-opts/
     ├── fonts/
     └── cache/
@@ -203,18 +202,13 @@ mpv --load-auto-profiles=no "%SOURCE%" --o=- --of=nut --ovc=rawvideo --oac=pcm_s
 
 Для вариантов 2–4 сохранить одинаковые разрешение, fps и настройки кодирования. Зафиксировать время обработки, скорость в fps, размер и битрейт, артефакты и субъективный результат в DeoVR. Это проверит вклад FSRCNNX в экспорт и пользу полной обработки. Затем подобрать несколько умеренных пресетов по типу исходника вместо одного агрессивного универсального.
 
-Готовый скрипт прогона: `tools\vr-ab-test.bat` (только cmd.exe). Результат пользователя: эффект FSRCNNX на выходе 4800×2400 **отчётливо виден в Quest 2**; результаты полной цепочки ещё не оценены.
+Готовый скрипт прогона: `tools\vr-ab-test.bat` в отдельном репозитории [taitoz/vfx](https://github.com/taitoz/vfx) (только cmd.exe). Результат пользователя: эффект FSRCNNX на выходе 4800×2400 **отчётливо виден в Quest 2**; результаты полной цепочки ещё не оценены.
 
 ### VR-предпросмотр и экспорт: проверенные детали
 
 Настройки предпросмотра находятся в `vr_profiles.conf`, `scripts/vr-detect.lua` и `shaders/vr-flat.glsl`: `vo=gpu-next`, `gpu-api=d3d11`, `hwdec=d3d11va`, GPU-репроекция без CPU-фильтра `v360`. Предпросмотр одного глаза не следует путать с экспортом полного стереокадра SBS/TB.
 
-`tools\vr-ab-test.bat [1|2|3] [секунды]` — переменные SRC/OUTDIR/OUTBASE/START/END/OUTW/OUTH/QP сверху; имя варианта в суффиксе файла:
-- `1` (`v1-fsrcnnx-adaptive`) — mpv `vf=gpu` с FSRCNNX + adaptive-sharpen сразу в итоговом размере → rawvideo/NUT pipe → FFmpeg: RGB→NV12 по BT.709 (многопоточно) → HEVC NVENC с тегами bt709/tv. Повторного масштабирования нет.
-- `2` (`v2-fsrcnnx-adaptive-restored`) — то же + `bilateral_cuda` и CPU `unsharp` в FFmpeg.
-- `3` (`v3-vsr`) — NVIDIA VFX VideoSuperRes по глазам через `tools\vr-vsr.py`, без mpv-рендера и шейдеров; только явным запуском (нужно Python-окружение, см. «VSR»).
-- Без аргумента выполняются 1→2. Второй аргумент — длительность в секундах для коротких прогонов.
-- Все варианты имеют одно разрешение `OUTW×OUTH` (по умолчанию 4800×2400).
+`vr-ab-test.bat [1|2|3] [секунды]` (в репозитории [taitoz/vfx](https://github.com/taitoz/vfx)) — переменные SRC/OUTDIR/OUTBASE/START/END/OUTW/OUTH/QP сверху; имя варианта в суффиксе файла. Вариант 1 — mpv `vf=gpu` с FSRCNNX + adaptive-sharpen сразу в итоговом размере → rawvideo/NUT pipe → FFmpeg: RGB→NV12 по BT.709 → HEVC NVENC с тегами bt709/tv; вариант 3 — NVIDIA VFX VideoSuperRes по глазам через `vr-vsr.py` без mpv-рендера и шейдеров. Все варианты имеют одно разрешение `OUTW×OUTH` (по умолчанию 4800×2400).
 
 Проверенные особенности:
 - FSRCNNX включается только при выходе **строго больше 1.4× исходника по обеим осям**. Для 3400×1700 при 4096×2048 вывод с FSRCNNX и без него побайтно совпадает; порог — от 4760×2380.
@@ -249,25 +243,9 @@ mpv --load-auto-profiles=no "%SOURCE%" --o=- --of=nut --ovc=rawvideo --oac=pcm_s
 - Измерить качество, плавность и нагрузку; не смешивать VSR с базовым чистым VR-превью.
 
 Что известно для экспорта:
-- В mpv VSR доступен только через `--vf=d3d11vpp=scaling-mode=nvidia:scale=<k>`, которому нужен D3D11-контекст окна. В режиме кодирования `--o` фильтр не создаётся (`Creating filter 'd3d11vpp' failed`: без VO нет D3D11-устройства; проверено на mpv 0.41 с `d3d11va` и `d3d11va-copy`). Значит, через `vr-ab-test.bat` драйверный VSR не экспортировать.
+- В mpv VSR доступен только через `--vf=d3d11vpp=scaling-mode=nvidia:scale=<k>`, которому нужен D3D11-контекст окна. В режиме кодирования `--o` фильтр не создаётся (`Creating filter 'd3d11vpp' failed`: без VO нет D3D11-устройства; проверено на mpv 0.41 с `d3d11va` и `d3d11va-copy`). Значит, через mpv драйверный VSR не экспортировать.
 - Драйверный RTX VSR (D3D11 video processor) по документации NVIDIA принимает вход от 360p до 1440p, выход до 4K, и не сообщает, включился ли он. Исходник 3400×1700 и выход 4800×2400 выходят за эти пределы — даже на воспроизведении он, вероятно, не включится, без видимой ошибки.
-- Офлайн-экспорт — **NVIDIA VFX SDK (Maxine) Video Super Resolution** через Python-пакет `nvidia-vfx`: режимы VSR LOW/MEDIUM/HIGH/ULTRA, а также DENOISE/DEBLUR/HIGHBITRATE; вход/выход — RGB на GPU. Лицензия SDK проприетарная NVIDIA: устанавливается пользователем, в проект не входит.
-
-#### `tools\vr-vsr.py` (экспериментально, на RTX ещё не запускался)
-
-Схема: FFmpeg-декодирование (CUDA) → RGB по матрице исходника → каждый глаз SBS/TB отдельно через свой экземпляр VideoSuperRes (модель не смешивает глаза и их временное состояние) → склейка → FFmpeg RGB→NV12 по BT.709 → NVENC, звук копируется из исходника. Если драйвер не принимает точный размер (например, 1700→2400 = 1.41×), скрипт берёт следующий целый масштаб (×2) и уменьшает до цели бикубически с антиалиасингом на GPU; выбранный путь печатается в начале. `--backend bicubic` — тот же конвейер без VSR, для A/B. Логи FFmpeg: `<выход>.dec.log`/`.enc.log`. Проверено на этом ПК только с `--backend bicubic` на CPU (размер, порядок глаз, звук, теги bt709/tv); VSR, скорость и пределы разрешения нужно проверить на RTX.
-
-Установка окружения (Python 3.12+, драйвер NVIDIA 570.65+), путь по умолчанию в `vr-ab-test.bat` — `%USERPROFILE%\mpv-vfx`, другой можно задать переменной `PY`:
-
-```cmd
-py -3.12 -m venv "%USERPROFILE%\mpv-vfx"
-"%USERPROFILE%\mpv-vfx\Scripts\python.exe" -m pip install torch==2.14.1 numpy --index-url https://download.pytorch.org/whl/cu126
-"%USERPROFILE%\mpv-vfx\Scripts\python.exe" -m pip install nvidia-vfx==0.2.0.0 --extra-index-url https://pypi.nvidia.com
-"%USERPROFILE%\mpv-vfx\Scripts\python.exe" -c "import torch, nvvfx; print(torch.cuda.get_device_name(0))"
-tools\vr-ab-test.bat 3 20
-```
-
-Сначала короткий прогон (20 с), затем полный. Для сравнения качества — `--quality ULTRA` или `MEDIUM` в строке `:run3`.
+- Офлайн-экспорт — **NVIDIA VFX SDK (Maxine) Video Super Resolution** через Python-пакет `nvidia-vfx` (`vr-vsr.py` в репозитории [taitoz/vfx](https://github.com/taitoz/vfx)): режимы VSR LOW/MEDIUM/HIGH/ULTRA, а также DENOISE/DEBLUR/HIGHBITRATE; вход/выход — RGB на GPU. Лицензия SDK проприетарная NVIDIA: устанавливается пользователем, в проект не входит. Установка окружения и команды запуска описаны в `docs/vr_sr.md` того репозитория.
 
 `vr_vsr.conf` уже существует как экспериментальный файл, но не подключён в `mpv.conf` и не считается проверенной реализацией. `vr_rst.conf` также не подключён по умолчанию.
 
