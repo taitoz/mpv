@@ -60,3 +60,6 @@ Desktop.ini
 /.idea/
 /.vscode/
 tools/__pycache__/
+tools/mpv-forward/target/
+# Prebuilt first-party shim kept in sync with src/ manually
+!tools/mpv-forward/bin/mpv-forward.exe

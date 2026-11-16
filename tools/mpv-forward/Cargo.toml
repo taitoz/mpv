@@ -1,0 +1,21 @@
+# Copyright (c) 2026 taitoz
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "mpv-forward"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Single-instance forwarder shim for mpv on Windows"
+
+[[bin]]
+name = "mpv-forward"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
