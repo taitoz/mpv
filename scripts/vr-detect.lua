@@ -1,4 +1,4 @@
--- VR profile detection for mpv (ffprobe metadata + filename fallback)
+-- VR profile selection for mpv (filename detection + manual toggle/cycling)
 -- Copyright (c) 2026 taitoz
 -- SPDX-License-Identifier: GPL-3.0-or-later
 --
@@ -8,13 +8,6 @@
 -- (at your option) any later version.
 
 local mp = require 'mp'
-local utils = require 'mp.utils'
-local options = {ffprobe = 'ffprobe', timeout = 10}
-require('mp.options').read_options(options, 'vr-detect')
-
-local function normalize(value)
-    return tostring(value or ''):lower():gsub('[%s%-]+', '_')
-end
 
 local function filename_profile(name)
     name = name:lower()
@@ -37,112 +30,59 @@ local function filename_profile(name)
     return 'none'
 end
 
-local function metadata_profile(data)
-    local stream = (data.streams or {})[1]
-    if not stream then return nil end
-    local tags = {}
-    for k, v in pairs((data.format or {}).tags or {}) do tags[k:lower()] = v end
-    for k, v in pairs(stream.tags or {}) do tags[k:lower()] = v end
-    local projection = normalize(tags.vr_projection or tags.projection)
-    local stereo = normalize(tags.stereo_mode or tags.stereo_layout)
-    local fov = tonumber(tags.vr_fov or tags.id_fov)
-    local unsupported = false
-    for _, side in ipairs(stream.side_data_list or {}) do
-        if side.side_data_type == 'Spherical Mapping' then
-            if projection == '' then projection = normalize(side.projection) end
-            if (tonumber(side.yaw) or 0) ~= 0 or (tonumber(side.pitch) or 0) ~= 0 or (tonumber(side.roll) or 0) ~= 0 then
-                unsupported = true
-            end
-            for _, key in ipairs({'bound_left', 'bound_right', 'bound_top', 'bound_bottom'}) do
-                if (tonumber(side[key]) or 0) ~= 0 then unsupported = true end
-            end
-        elseif side.side_data_type == 'Stereo 3D' and stereo == '' then
-            stereo = normalize(side.type)
-        end
+-- Last active VR mode; fallback when toggle-on cannot detect one.
+local last_mode = 'vr180'
+
+-- Instant filename-only detection; metadata probing was removed to avoid
+-- delaying playback start. VR detection is restricted to .mp4 filenames.
+mp.add_hook('on_load', 20, function()
+    local profile = 'none'
+    if mp.get_property('filename', ''):lower():match('%.mp4$') then
+        profile = filename_profile(mp.get_property('filename', ''))
     end
-    if unsupported then return nil, 'Spherical rotation/crop is not supported; using filename fallback' end
-    if projection == '' then return nil end
-    local layout
-    if stereo == 'left_right' or stereo == 'right_left' or stereo == 'side_by_side' or stereo == 'sbs' then
-        layout = 'sbs'
-    elseif stereo == 'top_bottom' or stereo == 'bottom_top' or stereo == 'top_and_bottom' or stereo == 'tb' or stereo == 'over_under' then
-        layout = 'tb'
-    elseif stereo == '' or stereo == 'mono' or stereo == '2d' then
-        layout = 'mono'
-    else
-        return nil, 'Unsupported stereo layout: ' .. stereo
+    mp.set_property_native('user-data/vr-profile', profile)
+    mp.set_property_native('user-data/vr-detection-source', 'filename')
+    if profile ~= 'none' then
+        last_mode = profile
+        mp.msg.info('VR detection: ' .. profile .. ' (filename)')
     end
-    if projection == 'fisheye' or projection == 'fisheye190' or projection == 'fisheye200' then
-        fov = fov or tonumber(projection:match('(%d+)$'))
-        if layout == 'sbs' and (fov == 190 or fov == 200) then return 'fisheye' .. fov end
-        return nil, 'Fisheye metadata requires SBS and an explicit 190/200 degree FOV'
-    end
-    local half = projection == 'hequirect' or projection == 'half_equirectangular' or projection == 'vr180' or projection == 'equirectangular180'
-    local full = projection == 'equirectangular' or projection == 'equirect' or projection == '360'
-    if not half and not full then return nil, 'Unsupported projection: ' .. projection end
-    if half then
-        if layout == 'sbs' then return 'vr180' end
-        return '180-' .. layout
-    end
-    if layout == 'tb' then return 'tb' end
-    return '360-' .. layout
+end)
+
+local function set_profile(mode, source)
+    mp.set_property_native('user-data/vr-profile', mode)
+    mp.set_property_native('user-data/vr-detection-source', source)
+    mp.osd_message('VR profile: ' .. mode)
 end
 
-mp.add_hook('on_load', 20, function(hook)
-    hook:defer()
-    mp.set_property_native('user-data/vr-profile', 'pending')
-    local path = mp.get_property('path', '')
-    local fallback = filename_profile(mp.get_property('filename', ''))
-    local finished = false
-    local request, timer
-    local function finish(profile, source)
-        if finished then return end
-        finished = true
-        if timer then timer:kill() end
-        mp.set_property_native('user-data/vr-profile', profile)
-        mp.set_property_native('user-data/vr-detection-source', source)
-        mp.msg.info('VR detection: ' .. profile .. ' (' .. source .. ')')
-        hook:cont()
-    end
-    if not mp.get_property('filename', ''):lower():match('%.mp4$') then
-        finish('none', 'non-MP4 input; VR disabled')
+-- Toggle flat preview on/off. When turning on, the mode is detected from the
+-- filename (any extension, not just .mp4); if detection fails, the last used
+-- mode is restored.
+mp.add_key_binding('toggle', function()
+    local cur = mp.get_property('user-data/vr-profile', 'none')
+    if cur ~= 'none' then
+        last_mode = cur
+        set_profile('none', 'manual')
         return
     end
-    if path:find('://', 1, true) or path == '-' then
-        finish(fallback, 'filename; non-local input skipped')
-        return
-    end
-    if not utils.file_info(path) then
-        finish(fallback, 'filename; local file unavailable')
-        return
-    end
-    timer = mp.add_timeout(options.timeout, function()
-        if request then mp.abort_async_command(request) end
-        mp.msg.warn('ffprobe timed out; using filename fallback')
-        finish(fallback, 'filename; ffprobe timeout')
-    end)
-    request = mp.command_native_async({
-        name = 'subprocess',
-        args = {options.ffprobe, '-v', 'error', '-select_streams', 'v:0',
-            '-show_entries', 'stream_tags:stream_side_data:format_tags', '-of', 'json', '-i', path},
-        playback_only = false,
-        capture_stdout = true,
-        capture_stderr = true,
-    }, function(success, result)
-        if finished then return end
-        if not success or not result or result.status ~= 0 then
-            mp.msg.warn('ffprobe failed; using filename fallback. Check ffprobe in PATH.')
-            finish(fallback, 'filename; ffprobe failed')
-            return
-        end
-        local data = utils.parse_json(result.stdout or '')
-        if type(data) ~= 'table' then
-            mp.msg.warn('Invalid ffprobe JSON; using filename fallback')
-            finish(fallback, 'filename; invalid ffprobe JSON')
-            return
-        end
-        local profile, reason = metadata_profile(data)
-        if reason then mp.msg.warn(reason) end
-        finish(profile or fallback, profile and 'metadata' or 'filename; no usable VR metadata')
-    end)
+    local detected = filename_profile(mp.get_property('filename', ''))
+    set_profile(detected ~= 'none' and detected or last_mode,
+        detected ~= 'none' and 'manual+filename' or 'manual')
 end)
+
+-- Manual profile cycling (script-binding vr-detect/cycle[-back]).
+local order = {'vr180', '360-sbs', '180-tb', 'tb', '360-mono', '180-mono',
+    'fisheye190', 'fisheye200', 'none'}
+
+local function cycle(direction)
+    local cur = mp.get_property('user-data/vr-profile', 'none')
+    local idx = 0
+    for i, v in ipairs(order) do
+        if v == cur then idx = i break end
+    end
+    local mode = order[((idx + direction - 1) % #order) + 1]
+    if mode ~= 'none' then last_mode = mode end
+    set_profile(mode, 'manual')
+end
+
+mp.add_key_binding('cycle', function() cycle(1) end)
+mp.add_key_binding('cycle-back', function() cycle(-1) end)
