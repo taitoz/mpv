@@ -60,4 +60,4 @@ local function copy_probe()
     end)
 end
 
-mp.add_key_binding('copy', copy_probe)
+mp.add_key_binding(nil, 'copy', copy_probe)

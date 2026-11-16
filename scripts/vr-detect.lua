@@ -57,8 +57,8 @@ end
 -- Toggle flat preview on/off. When turning on, the mode is detected from the
 -- filename (any extension, not just .mp4); if detection fails, the last used
 -- mode is restored.
-mp.add_key_binding('toggle', function()
-    local cur = mp.get_property('user-data/vr-profile', 'none')
+mp.add_key_binding(nil, 'toggle', function()
+    local cur = mp.get_property_native('user-data/vr-profile', 'none')
     if cur ~= 'none' then
         last_mode = cur
         set_profile('none', 'manual')
@@ -74,7 +74,7 @@ local order = {'vr180', '360-sbs', '180-tb', 'tb', '360-mono', '180-mono',
     'fisheye190', 'fisheye200', 'none'}
 
 local function cycle(direction)
-    local cur = mp.get_property('user-data/vr-profile', 'none')
+    local cur = mp.get_property_native('user-data/vr-profile', 'none')
     local idx = 0
     for i, v in ipairs(order) do
         if v == cur then idx = i break end
@@ -84,5 +84,5 @@ local function cycle(direction)
     set_profile(mode, 'manual')
 end
 
-mp.add_key_binding('cycle', function() cycle(1) end)
-mp.add_key_binding('cycle-back', function() cycle(-1) end)
+mp.add_key_binding(nil, 'cycle', function() cycle(1) end)
+mp.add_key_binding(nil, 'cycle-back', function() cycle(-1) end)
