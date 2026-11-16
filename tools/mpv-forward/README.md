@@ -39,6 +39,28 @@ cargo build --release
 copy target\release\mpv-forward.exe ..\..\..\mpv.exe-dir\
 ```
 
+## File associations (Windows 11)
+
+`Register-MpvForward.ps1` registers `mpv-forward.exe` as a handler for all
+video extensions in HKCU (no admin needed): per-extension ProgIds with an
+open verb, `SupportedTypes`/`Capabilities`/`RegisteredApplications` so the app
+appears in Settings > Default apps and "Open with", plus an
+"Open with mpv-forward" context-menu verb per extension.
+
+```powershell
+.\Register-MpvForward.ps1                  # register all video types
+.\Register-MpvForward.ps1 -WhatIf          # dry run
+.\Register-MpvForward.ps1 -Unregister      # remove everything
+.\Register-MpvForward.ps1 -ExePath D:\mpv\mpv-forward.exe
+.\Register-MpvForward.ps1 -Extensions mp4,mkv
+```
+
+Windows 11 caveat: extensions that already have a user-chosen default
+(`FileExts\<ext>\UserChoice`, hash-protected) cannot be claimed
+programmatically — those must be finished in Settings > Apps > Default apps >
+mpv-forward, which the script opens automatically (`-NoSettingsPrompt` to
+skip).
+
 ## Manual test matrix
 
 - [ ] No instance: `mpv-forward file.mp4` launches mpv normally.
