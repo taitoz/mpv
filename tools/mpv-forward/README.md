@@ -47,19 +47,70 @@ open verb, `SupportedTypes`/`Capabilities`/`RegisteredApplications` so the app
 appears in Settings > Default apps and "Open with", plus an
 "Open with mpv-forward" context-menu verb per extension.
 
+Run:
+
 ```powershell
-.\Register-MpvForward.ps1                  # register all video types
+powershell -ExecutionPolicy Bypass -File .\Register-MpvForward.ps1
+```
+
+All options:
+
+```powershell
+.\Register-MpvForward.ps1                  # register + force all video defaults
+.\Register-MpvForward.ps1 -NoForce         # register without claiming defaults
 .\Register-MpvForward.ps1 -WhatIf          # dry run
 .\Register-MpvForward.ps1 -Unregister      # remove everything
 .\Register-MpvForward.ps1 -ExePath D:\mpv\mpv-forward.exe
 .\Register-MpvForward.ps1 -Extensions mp4,mkv
 ```
 
-Windows 11 caveat: extensions that already have a user-chosen default
-(`FileExts\<ext>\UserChoice`, hash-protected) cannot be claimed
-programmatically — those must be finished in Settings > Apps > Default apps >
-mpv-forward, which the script opens automatically (`-NoSettingsPrompt` to
-skip).
+By default the script also claims extensions already owned by other apps:
+`SetUserFTA.exe` (third-party, **personal-use only**) computes the
+protected `UserChoice` hash. It is looked up next to this script or next to
+`mpv.exe` and auto-downloaded from setuserfta.com (v1.8.3) when absent;
+override with `-SetUserFta <path>`, opt out with `-NoForce`. Verified on
+Windows 11; this is an unsupported technique that Microsoft can break with
+an update. Note that `UserChoice` entries are ACL-protected and cannot be
+removed by `-Unregister` — reset them manually in Default apps if ever
+needed.
+
+With `-NoForce`, extensions that already have a user-chosen default
+(`FileExts\<ext>\UserChoice`, hash-protected) cannot be claimed — on stock
+Windows 11 most video types belong to Media Player, so finishing in
+Settings > Apps > Default apps > mpv-forward is expected. The script
+registers in every location the pickers read
+(`Classes\.ext\OpenWithProgids`, `FileExts\.ext\OpenWithProgids`,
+`SystemFileAssociations\video` covering all PerceivedType=video files,
+app Capabilities), so mpv-forward should appear in all lists; if entries
+look stale, sign out and back in to refresh the association cache.
+
+## Removing stock players
+
+`RemoveStockPlayers.ps1` uninstalls the built-in Windows players so they
+stop competing for associations: Media Player (`Microsoft.ZuneMusic`),
+Movies & TV (`Microsoft.ZuneVideo`), and Windows Media Player Legacy
+(WMP12, disabled as an optional feature / removed as a capability).
+`-IncludePhotos` also removes Photos. Per-user AppX removal works without
+admin; provisioned-package and WMP removal need an elevated shell — without
+admin those steps are skipped with a warning. Unless `-NoRegister` is
+passed it then re-runs `Register-MpvForward.ps1` to re-claim the orphaned
+associations:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\RemoveStockPlayers.ps1
+```
+
+## Icon
+
+`Copy-MpvIcon.ps1` copies the icon resources from `mpv.exe` into
+`mpv-forward.exe` (pure Win32 resource APIs, no external tools), so the
+shim shares mpv's icon in Explorer, the taskbar and file associations.
+Run it after building/copying a fresh `mpv-forward.exe`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Copy-MpvIcon.ps1                        # patches ..\..\..\mpv-forward.exe
+powershell -ExecutionPolicy Bypass -File .\Copy-MpvIcon.ps1 -Target .\bin\mpv-forward.exe
+```
 
 ## Manual test matrix
 
