@@ -27,9 +27,17 @@ param(
     [string]$SetUserFta,
     [string]$ProgIdPrefix = 'mpv-forward',
     [string[]]$Extensions = @(
+        # core (uosc video_types)
         '3g2','3gp','asf','avi','divx','f4v','flv','h264','h265','hevc',
         'm2t','m2ts','m4v','mkv','mov','mp4','mp4v','mpeg','mpg','mts',
-        'ogm','ogv','rm','rmvb','ts','vob','webm','wmv','y4m'
+        'ogm','ogv','rm','rmvb','ts','vob','webm','wmv','y4m',
+        # extended containers/codecs
+        '3gp2','3gpp','3gpp2','amv','bik','bik2','d2v','dav','drc','dv',
+        'dvr-ms','evo','fli','flc','hdmov','ifo','ivf','m1v','m2v','mjp',
+        'mjpeg','mjpg','mk3d','mod','mp2v','mpe','mpv','mpg4','mqv','mxf',
+        'nsv','nut','nuv','pva','qt','r3d','rec','smk','smv','swf',
+        'thp','tod','trp','ty','vc1','vid','vro','wvx','xesc','yuv',
+        'prores','wtv','tp','dif'
     ),
     [switch]$Unregister,
     [switch]$NoForce,
@@ -38,6 +46,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# powershell -File passes "a,b,c" as one string; split comma lists either way
+# and normalize "*.ext"/".ext" inputs down to bare extension names.
+$Extensions = @($Extensions | ForEach-Object { $_ -split ',' } | ForEach-Object { ($_.Trim() -replace '^[*.]+|[*.]+$','').ToLower() } | Where-Object { $_ })
 
 # --- Locate mpv-forward.exe --------------------------------------------------
 if (-not $ExePath) {
@@ -152,10 +164,28 @@ function Register-Extension([string]$Ext) {
         Set-Key "$verb\command" $openCmd
     }
 
-    # Force the default via UserChoice (third-party hash tool).
+    # Force the default via UserChoice (third-party hash tool). SetUserFTA
+    # quirks observed on Windows 11: it exits 0 even when the UserChoice was
+    # not written, occasionally hangs, and leaves a junk '..ext' staging key
+    # behind. Run it with a timeout, verify the registry, retry, clean up.
     if ($useFta -and $PSCmdlet.ShouldProcess("$ext UserChoice", 'SetUserFTA')) {
-        $null = & $SetUserFta ".$Ext" $progId 2>&1
-        if ($LASTEXITCODE -eq 0) { $script:forced++ } else { $script:forceFailed += $Ext }
+        $done = $false
+        foreach ($attempt in 1..3) {
+            $p = [Diagnostics.Process]::Start($SetUserFta, "$ext $progId")
+            if (-not $p.WaitForExit(20000)) {
+                try { $p.Kill() } catch {}
+                $p.WaitForExit()
+            }
+            $p.Dispose()
+            $uc = Get-ItemProperty "$fileExts\$ext\UserChoice" -ErrorAction SilentlyContinue
+            if ($uc -and $uc.ProgId -eq $progId) { $done = $true; break }
+            Start-Sleep -Milliseconds 500
+        }
+        if ($done) { $script:forced++ } else { $script:forceFailed += $Ext }
+        $junkUc = Get-ItemProperty "$fileExts\..$Ext\UserChoice" -ErrorAction SilentlyContinue
+        if ($junkUc -and $junkUc.ProgId -eq $progId) {
+            Remove-Item -LiteralPath "$fileExts\..$Ext" -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -220,6 +250,12 @@ function Unregister-Extension([string]$Ext) {
             $PSCmdlet.ShouldProcess("$fileExts\$ext\OpenWithProgids\$progId", 'remove registry value')) {
         Remove-ItemProperty -LiteralPath "$fileExts\$ext\OpenWithProgids" -Name $progId -Force -ErrorAction SilentlyContinue
     }
+    # SetUserFTA '..ext' staging leftovers carrying our ProgId.
+    $junkUc = Get-ItemProperty "$fileExts\..$Ext\UserChoice" -ErrorAction SilentlyContinue
+    if ($junkUc -and $junkUc.ProgId -eq $progId -and
+            $PSCmdlet.ShouldProcess("$fileExts\..$Ext", 'remove SetUserFTA staging key')) {
+        Remove-Item -LiteralPath "$fileExts\..$Ext" -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Remove-Key "$classes\SystemFileAssociations\$ext\shell\mpv-forward"
 }
 
@@ -271,7 +307,7 @@ Notify-AssocChanged
 
 Write-Host ("Registered mpv-forward.exe for {0} video extension(s).`n  Exe: {1}" -f $Extensions.Count, $ExePath)
 if ($useFta) {
-    Write-Host ("UserChoice forced via SetUserFTA: {0} ok, {1} failed" -f $script:forced, $script:forceFailed.Count)
+    Write-Host ("UserChoice forced via SetUserFTA (verified): {0} ok, {1} failed" -f $script:forced, $script:forceFailed.Count)
     if ($script:forceFailed) { Write-Host ("Failed: " + ($script:forceFailed -join ', ')) }
 } else {
     Write-Host 'Extensions without an existing default now open in mpv-forward.'

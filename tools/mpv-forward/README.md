@@ -68,11 +68,14 @@ By default the script also claims extensions already owned by other apps:
 `SetUserFTA.exe` (third-party, **personal-use only**) computes the
 protected `UserChoice` hash. It is looked up next to this script or next to
 `mpv.exe` and auto-downloaded from setuserfta.com (v1.8.3) when absent;
-override with `-SetUserFta <path>`, opt out with `-NoForce`. Verified on
-Windows 11; this is an unsupported technique that Microsoft can break with
-an update. Note that `UserChoice` entries are ACL-protected and cannot be
-removed by `-Unregister` — reset them manually in Default apps if ever
-needed.
+override with `-SetUserFta <path>`, opt out with `-NoForce`. Each call is
+run with a timeout and the resulting `UserChoice` is verified in the
+registry (the tool exits 0 even when the write did not happen, occasionally
+hangs, and leaves junk `..ext` staging keys that the script cleans up), so
+the reported ok/failed counts are real. Verified on Windows 11; this is an
+unsupported technique that Microsoft can break with an update. Note that
+`UserChoice` entries are ACL-protected and cannot be removed by
+`-Unregister` — reset them manually in Default apps if ever needed.
 
 With `-NoForce`, extensions that already have a user-chosen default
 (`FileExts\<ext>\UserChoice`, hash-protected) cannot be claimed — on stock
